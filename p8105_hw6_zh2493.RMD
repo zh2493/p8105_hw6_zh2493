@@ -1,0 +1,189 @@
+---
+title: "p8105_hw6_zh2493"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message = FALSE}
+library(tidyverse)
+library(modelr)
+
+```
+
+## Problem1
+```{r, message = FALSE}
+### load data and clean
+baby_df = 
+  read_csv("./data/birthweight.csv") %>% 
+  mutate(babysex = ifelse(babysex == 1, "male", "female"),
+         frace = recode_factor(frace, '1' = 'White', '2' = 'Black', '3' = 'Asian', '4' = 'Puerto Rican', '8' = 'Other', '9' = 'Unknown'),
+         mrace = recode_factor(mrace, '1' = 'White', '2' = 'Black', '3' = 'Asian', '4' = 'Puerto Rican', '8' = 'Other'),
+         malform = recode_factor(malform, '0' = 'absent', '1' = 'present')
+  )
+
+```
+
+### model
+I choose the backward stepwise regression. Calculate the AIC score to select variables.
+```{r, message = FALSE}
+baby_fit =
+  lm(bwt ~ ., data = baby_df) %>% 
+  step(direction = "both") 
+
+summary(baby_fit)
+```
+The result of stepwise regression provide these variables:  
+babysex, bhead, blength, delwt, fincome, gaweeks,  mheight, mrace, parity, ppwt, smoken    
+So
+
+```{r, message = FALSE}
+fit_baby = lm(bwt ~ babysex + bhead + blength + delwt + fincome + gaweeks + mheight + mrace + parity + ppwt + smoken, data = baby_df)
+```
+
+#### resuduals and predictions and plot :
+
+```{r, message = FALSE}
+fit_df = 
+  baby_df %>% 
+  modelr::add_residuals(fit_baby) %>% 
+  modelr::add_predictions(fit_baby)
+
+fit_df %>%   
+  ggplot(aes(x = pred, y = resid)) + 
+  geom_point() +
+  geom_smooth(method = "lm", color = "red", linetype = 2) + 
+  labs(
+    title = "Residuals VS. Fitted Values",
+    x = "Predictions",
+    y = "Residuals"
+  )
+```
+
+#### Compare to two others
+model 1
+using length at birth and gestational age as predictors (main effects only)
+model 2
+using head circumference, length, sex, and all interactions (including the three-way interaction) between these
+```{r, message = FALSE}
+
+fit_1 = lm(bwt ~ blength + gaweeks, data = baby_df) %>% 
+  broom::tidy()
+
+fit_2 = lm(bwt ~ bhead * blength * babysex, data = baby_df) %>% 
+  broom::tidy()
+```
+
+#### crossv_mc
+```{r, message = FALSE}
+cv_df = 
+  crossv_mc(baby_df, 100) %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)) %>% 
+  
+  mutate(
+    fit_baby = map(train, ~lm(bwt ~ babysex + bhead + blength + delwt + fincome + gaweeks + mheight + mrace + parity + ppwt + smoken, data = baby_df)),
+    fit_1 = map(.x = train,~lm(bwt ~ blength + gaweeks, data = .x)),
+    fit_2 = map(.x = train,~lm(bwt~ bhead*blength*babysex, data = .x)),
+  ) %>% 
+  
+  mutate(
+    fit_baby_rmse = map2_dbl(fit_baby, test, ~rmse(model = .x, data = .y)),
+    fit_1_rmse = map2_dbl(fit_1, test, ~rmse(model = .x, data = .y)),
+    fit_2_rmse = map2_dbl(fit_2, test, ~rmse(model = .x, data = .y))
+  ) %>% 
+  select(ends_with('rmse')) %>% 
+  pivot_longer(
+    everything(),
+    names_to = 'model',
+    values_to = 'rmse'
+  ) %>% 
+    ggplot(aes(x = model, y = rmse)) + geom_violin()
+cv_df
+```
+ 
+we could find that my model has lowest rmse, which means that it could be the best model among these three models, and the fit_2(using head circumference, length, sex) is better than fit_1(sing length at birth and gestational age as predictors). 
+
+
+## Problem 3
+
+```{r}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+
+### Bootstrap
+```{r}
+set.seed(1)
+weather_bootst = 
+  weather_df %>% 
+  modelr::bootstrap(n = 5000) %>% 
+  mutate(
+    models = map(strap, ~lm(tmax ~ tmin, data = .x) ),
+    results = map(models, broom::tidy),
+    glance = map(models, broom::glance)) %>% 
+  unnest(results,glance) %>% 
+  select(id = .id, term, estimate, r.squared) 
+```
+
+### Plot the distribution of r^2
+```{r}
+weather_bootst %>% 
+  ggplot(aes(x = r.squared)) + 
+  geom_density() +
+  labs(title = 'distribution of r_squared')
+```
+the density plot shows that r_squared follows an approximately normal distribution. 
+
+### 95% confidence interval for r^2
+```{r}
+weather_bootst %>% 
+  summarize(
+    ci_lower = quantile(r.squared, 0.025), 
+    ci_upper = quantile(r.squared, 0.975)) %>% 
+  knitr::kable()
+```
+The 95% confidence interval of the estimated r^2 value is (0.8936684, 0.927106)
+#### Plot the distribution of log(beta0*beta1)
+
+```{r}
+log_df = 
+  weather_bootst %>% 
+  pivot_wider(
+    names_from = term,
+    values_from = estimate
+  ) %>%
+  mutate(intercept = `(Intercept)`,
+    log_value = log(intercept*tmin))
+
+log_df %>% 
+  ggplot(aes(x = log_value)) +
+  geom_density() +
+  xlab("log(beta0*beta1)")
+```
+The density plot shows that log(beta0∗beta1) follows an approximately normal distribution.  
+
+
+#### 95% confidence interval for log(beta0∗beta1)
+
+```{r}
+log_df %>% 
+  summarize(
+    ci_lower = quantile(log_value, 0.025), 
+    ci_upper = quantile(log_value, 0.975)) %>% 
+  knitr::kable()
+```
+The 95% confidence interval of the estimated log(beta0∗beta1) value is (1.96, 2.06).
+
